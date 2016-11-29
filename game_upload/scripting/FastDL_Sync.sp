@@ -28,10 +28,11 @@ int DLTable = INVALID_STRING_TABLE;
 int AmountThreads;
 bool bWork;
 int iFilesCount;
+Database hDB;
 
 public Plugin myinfo = {
     description = "Synchronizes your FastDL with server files.",
-    version     = "0.1-dev",
+    version     = "0.1.1-dev",
     author      = "Kruzya",
     name        = "FastDL updater",
     url         = "https://kruzefag.ru/"
@@ -87,6 +88,12 @@ public int GetFilepath(int iFileNum, char[] str, int maxLength) {
     return ReadStringTable(DLTable, iFileNum, str, maxLength);
 }
 
+public int GetFilename(char[] filename, char[] output, int maxLength) {
+    char sTemp[10][50];
+    int ID = ExplodeString(filename, "/", sTemp, 10, 50);
+    return strcopy(output, maxLength, sTemp[ID-1]);
+}
+
 void RecreateFilesArray() {
     if (hFiles != null)
         ClearArray(hFiles);
@@ -128,6 +135,17 @@ public void SQL_Start() {
 public void SQL_ClearFiles() {
     char sQuery[256];
     FormatEx(sQuery, sizeof(sQuery), "DELETE * FROM `fastdl_files` WHERE `server` = (SELECT `id` FROM `fastdl_servers` WHERE `ip` = %d AND `port` = %d)", GetServerIP(), GetServerPort());
+    hDB.Query(SQL_DefaultCallback, sQuery);
+}
+
+public void SQL_SendFileToDB(char[] file) {
+    char sPacked[PLATFORM_MAX_PATH],
+        sQuery[256],
+        sTemp[256];
+    FormatEx(sPacked, PLATFORM_MAX_PATH, "%s.bz2", file);
+    hDB.Escape(sPacked, sPacked, PLATFORM_MAX_PATH);
+    FormatEx(sQuery, sizeof(sQuery), "INSERT INTO `fastdl_files` (`file`, `server`) VALUES (%s, (SELECT `id` FROM `fastdl_servers` WHERE `ip` = %d AND `port` = %d));", sPacked);
+    
     hDB.Query(SQL_DefaultCallback, sQuery);
 }
 
@@ -200,7 +218,7 @@ public Action FastDLWorker(Handle hTimer, any iWorker) {
     GetFilename(sFile, sCompressed, PLATFORM_MAX_PATH);
     BuildPath(Path_SM, sCompressed, PLATFORM_MAX_PATH, "data/%s.bz2", sCompressed);
     
-    FastDL_SendToDB(sFile, sCompressed);
+    FastDL_SendToDB(sFile);
     
     BZ2_CompressFile(sFile, sCompressed, 9, OnFilePacked, iWorker);
 }
