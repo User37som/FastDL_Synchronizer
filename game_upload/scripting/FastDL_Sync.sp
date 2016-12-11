@@ -151,7 +151,7 @@ public void OnFilePacked(BZ_Error iErr, char[] sFile, char[] sCompressed, any wo
     /* Check error exists */
     if (iErr != BZ_OK) {
         LogError("Couldn't pack file \"%s\" to archive. Error code: %d. Worker ID: %d.", sFile, iErr, worker);
-        
+        return;
     }
     /* Start upload transfer task. */
     /* Create cURL handle and setting default params */
@@ -161,6 +161,28 @@ public void OnFilePacked(BZ_Error iErr, char[] sFile, char[] sCompressed, any wo
     curl_easy_setopt_int64(     hcURL,  CURLOPT_MAX_SEND_SPEED_LARGE,   sWorkers_TransferLimit);
     curl_easy_setopt_int(       hcURL,  CURLOPT_TIMEOUT,                iWorkers_Timeout);
     
-    /* Prepare paths */
-    // Coming Soon
+    /* Prepare path */
+    char sFileOnFTP[PLATFORM_MAX_PATH];
+    FormatEx(sFileOnFTP, sizeof(sFileOnFTP), "%s/%s", sCFG_FTPDir, sCompressed);
+    
+    /* Start upload */
+    Handle hFile = curl_OpenFile(sCompressed, "rb");
+    if (!hFile) {
+        CloseHandle(hcURL);
+        LogError( g_logfile, "Couldn't open \"%s\" for upload!", source );
+        return;
+    }
+    
+    LogMessage("Start uploading file \"%s\"...", sCompressed);
+    curl_easy_setopt_handle(hcURL,  CURLOPT_READDATA,   hFile);
+    curl_easy_setopt_string(hcURL,  CURLOPT_URL,        sFileOnFTP);
+    curl_easy_perform_thread(hcURL, OnUploadComplete,   worker);
+}
+
+public void OnUploadComplete(Handle hcURL, CURLcode iCode, any worker) {
+    CloseHandle(hcURL);
+    if (iCode != CURLE_OK)
+        LogError("Upload failed.");
+    
+    CreateTimer(0.5*worker, FastDLWorker, worker);
 }
