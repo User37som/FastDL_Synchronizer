@@ -13,6 +13,8 @@
  * * (optionally) PHP 5.3 for cleaning unused files from web-host
  **/
 
+#define DEBUG       true
+
 #include <sourcemod>
 #include <dbi>
 #include <sdktools>
@@ -23,16 +25,28 @@
 
 #pragma newdecls required
 
+#include "fastdl_sync/helpers.sp"
+#include "fastdl_sync/config.sp"
+#include "fastdl_sync/sql.sp"
+#include "fastdl_sync/stringtable.sp"
+
 Handle hFiles = null;
-int DLTable = INVALID_STRING_TABLE;
-int AmountThreads;
-bool bWork;
 int iFilesCount;
-Database hDB;
+bool bWork;
+
+/* Default cURL options */
+int cURL_DefaultOptions[][] = {
+    {view_as<int>(CURLOPT_FTP_CREATE_MISSING_DIRS), view_as<int>(CURLFTP_CREATE_DIR)},
+    {view_as<int>(CURLOPT_NOSIGNAL),                1},
+    {view_as<int>(CURLOPT_NOPROGRESS),              1},
+    {view_as<int>(CURLOPT_CONNECTTIMEOUT),          60},
+    {view_as<int>(CURLOPT_VERBOSE),                 0},
+    {view_as<int>(CURLOPT_UPLOAD),                  1}
+};
 
 public Plugin myinfo = {
     description = "Synchronizes your FastDL with server files.",
-    version     = "0.1.1-dev",
+    version     = "0.1.2-dev",
     author      = "Kruzya",
     name        = "FastDL updater",
     url         = "https://kruzefag.ru/"
@@ -42,15 +56,15 @@ public void OnPluginStart() {
     RegServerCmd("sm_fastdl_update", OnNeedSyncFastDLFiles);
     RegServerCmd("sm_fastdl_list",   OnNeedPrintListFiles);
 
-    ConVar cvTogetherUploadingFiles = CreateConVar("sm_fastdl_amountfiles", "2", "Allows you to control the amount at once uploads.", 0);
-    cvTogetherUploadingFiles.AddChangeHook(OnCVarUpdate);
-    delete cvTogetherUploadingFiles;
-    AmountThreads = 2;
-    
-    bWork = false;
-    
     /* Init */
-    SQL_Start();
+    BuildPath(Path_SM,  sCFGPath, PLATFORM_MAX_PATH, "cfg/fastdl.cfg");
+    if (!FileExists(sCFGPath)) {
+        SetFailState("Config (%s) not found.", sCFGPath);
+        return;
+    }
+    bWork = false;
+    SQL_StartConnect();
+    CFG_StartRead();
 }
 
 /* DEBUG CMD */
@@ -68,105 +82,11 @@ public Action OnNeedPrintListFiles(int argc) {
     return Plugin_Handled;
 }
 
-public void OnCVarUpdate(ConVar cv, const char[] oV, const char[] nV) {
-    AmountThreads = StringToInt(nV);
-}
-
-/* Helpers */
-void ValidateDLTable() {
-    if (DLTable == INVALID_STRING_TABLE)
-        DLTable = FindStringTable("downloadables");
-}
-
-public int GetAmountFiles() {
-    ValidateDLTable();
-    return GetStringTableNumStrings(DLTable);
-}
-
-public int GetFilepath(int iFileNum, char[] str, int maxLength) {
-    ValidateDLTable();
-    return ReadStringTable(DLTable, iFileNum, str, maxLength);
-}
-
-public int GetFilename(char[] filename, char[] output, int maxLength) {
-    char sTemp[10][50];
-    int ID = ExplodeString(filename, "/", sTemp, 10, 50);
-    return strcopy(output, maxLength, sTemp[ID-1]);
-}
-
 void RecreateFilesArray() {
     if (hFiles != null)
         ClearArray(hFiles);
     else
         hFiles = CreateArray(PLATFORM_MAX_PATH);
-}
-
-public int GetServerIP() {
-    static int iIP;
-    if (iIP)
-        return iIP;
-
-    ConVar hIP = FindConVar("hostip");
-    iIP = hIP.IntValue;
-    delete hIP;
-    
-    return iIP;
-}
-
-public int GetServerPort() {
-    static int iPort;
-    if (iPort)
-        return iPort;
-
-    ConVar hPort = FindConVar("hostport");
-    iPort = hPort.IntValue;
-    delete hPort;
-    
-    return iPort;
-}
-
-/* SQL */
-public void SQL_Start() {
-    if (bCanWork)
-        delete hDB;
-    hDB.Connect(SQL_ConnectCallback, "fastdl");
-}
-
-public void SQL_ClearFiles() {
-    char sQuery[256];
-    FormatEx(sQuery, sizeof(sQuery), "DELETE * FROM `fastdl_files` WHERE `server` = (SELECT `id` FROM `fastdl_servers` WHERE `ip` = %d AND `port` = %d)", GetServerIP(), GetServerPort());
-    hDB.Query(SQL_DefaultCallback, sQuery);
-}
-
-public void SQL_SendFileToDB(char[] file) {
-    char sPacked[PLATFORM_MAX_PATH],
-        sQuery[256],
-        sTemp[256];
-    FormatEx(sPacked, PLATFORM_MAX_PATH, "%s.bz2", file);
-    hDB.Escape(sPacked, sPacked, PLATFORM_MAX_PATH);
-    FormatEx(sQuery, sizeof(sQuery), "INSERT INTO `fastdl_files` (`file`, `server`) VALUES (%s, (SELECT `id` FROM `fastdl_servers` WHERE `ip` = %d AND `port` = %d));", sPacked);
-    
-    hDB.Query(SQL_DefaultCallback, sQuery);
-}
-
-public void SQL_ConnectCallback(Database hDatabase, const char[] error) {
-    if (!hDatabase) {
-        LogError("Unable to connect database: %s", error);
-        bCanWork = false;
-        return;
-    }
-    
-    hDB = hDatabase;
-    hDB.SetCharset("utf8");
-    
-    // SQL_CheckTables();
-    SQL_ClearFiles();
-    bCanWork = true;
-}
-
-public void SQL_DefaultCallback(Database db, DBResultSet res, const char[] error) {
-    if (!db || !res)
-        LogError("Error with executing query: %s", error);
 }
 
 /* Updater code */
@@ -180,7 +100,7 @@ public Action OnNeedSyncFastDLFiles(int argc) {
 
 public Action StartFastDL_Update(Handle hTimer) {
     iFilesCount = GetAmountFiles();
-    PrintToServer("[FastDL] Need upload %d files. Allowed %d workers.", iFilesCount, AmountThreads);
+    PrintToServer("[FastDL] Need upload %d files. Allowed %d workers.", iFilesCount, iWorkers_Threads);
     CreateTimer(0.5, FastDL_PrepareFilesList);
 }
 
@@ -201,7 +121,7 @@ public Action FastDL_PrepareFilesList(Handle hTimer) {
     iFilesCount = GetArraySize(hFiles);
     PrintToServer("[FastDL] Downloadables list fully readed. Founded and added to upload list %d files.", iFilesCount);
     
-    for (int iWorker = 1; iWorker <= AmountThreads; iWorker++)
+    for (int iWorker = 1; iWorker <= iWorkers_Threads; iWorker++)
         CreateTimer(0.5*iWorker, FastDLWorker, iWorker);
 }
 
@@ -218,11 +138,29 @@ public Action FastDLWorker(Handle hTimer, any iWorker) {
     GetFilename(sFile, sCompressed, PLATFORM_MAX_PATH);
     BuildPath(Path_SM, sCompressed, PLATFORM_MAX_PATH, "data/%s.bz2", sCompressed);
     
-    FastDL_SendToDB(sFile);
+    /* SQL: Send file to DB */
+    // Coming Soon
+    
+    /* Remove file from ADT_Array */
+    RemoveFromArray(hFiles, 0);
     
     BZ2_CompressFile(sFile, sCompressed, 9, OnFilePacked, iWorker);
 }
 
 public void OnFilePacked(BZ_Error iErr, char[] sFile, char[] sCompressed, any worker) {
+    /* Check error exists */
+    if (iErr != BZ_OK) {
+        LogError("Couldn't pack file \"%s\" to archive. Error code: %d. Worker ID: %d.", sFile, iErr, worker);
+        
+    }
+    /* Start upload transfer task. */
+    /* Create cURL handle and setting default params */
+    Handle hcURL = curl_easy_init();
+    curl_easy_setopt_int_array( hcURL,  cURL_DefaultOptions,            sizeof(cURL_DefaultOptions));
+    curl_easy_setopt_string(    hcURL,  CURLOPT_USERPWD,                sCFG_FTPAuth);
+    curl_easy_setopt_int64(     hcURL,  CURLOPT_MAX_SEND_SPEED_LARGE,   sWorkers_TransferLimit);
+    curl_easy_setopt_int(       hcURL,  CURLOPT_TIMEOUT,                iWorkers_Timeout);
     
+    /* Prepare paths */
+    // Coming Soon
 }
